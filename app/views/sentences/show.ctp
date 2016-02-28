@@ -28,6 +28,7 @@
 $javascript->link('jquery.scrollTo.min.js', false);
 $javascript->link('sentences.logs.js', false);
 
+if (!isset($searchProblem)) {
 if (isset($sentence)) {
     $sentenceId = $sentence['Sentence']['id'];
     $sentenceLang = $sentence['Sentence']['lang'];
@@ -165,9 +166,8 @@ $navigation->displaySentenceNavigation(
             $sentences->displaySentencesGroup(
                 $sentence['Sentence'],
                 $sentence['Transcription'],
-                $translations,
-                $sentence['User'],
-                $indirectTranslations
+                $sentence['Translation'],
+                $sentence['User']
             );
             
         } else {
@@ -234,4 +234,23 @@ $navigation->displaySentenceNavigation(
     echo '</div>';
     ?>
 </div>
+<?php 
+} else {
+?>
+    <div id="main_content">
+        <div class="module">
+            <?php
+            echo $html->tag('h2', __('Random Sentence',true));
+            if($searchProblem == 'disabled') {
+                echo $html->tag('p', __('The random sentence feature is currently disabled, please try again later.', true));
+            } else if ($searchProblem == 'error') {
+                echo $html->tag('p', format(__('An error occurred while fetching random sentences. '. 
+                                               'If this persists, please <a href="{}">let us know</a>.', true),
+                                     $html->url(array("controller"=>"pages", "action" => "contact"))
+                ));
+            }
+            ?>
+        </div>
+    </div>
+<?php } ?>
 

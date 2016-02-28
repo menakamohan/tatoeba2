@@ -201,15 +201,8 @@ class SentencesController extends AppController
 
             $this->set('sentence', $sentence);
 
-            // we get translations and split them
-            $alltranslations = $this->Sentence->getTranslationsOf($id);
-            $translations = $alltranslations['Translation'];
-            $indirectTranslations = $alltranslations['IndirectTranslation'];
-
             $this->set('tagsArray', $tagsArray);
             $this->set('listsArray', $listsArray);
-            $this->set('translations', $translations);
-            $this->set('indirectTranslations', $indirectTranslations);
 
         } else {
             // ----- if we want a random sentence in a specific language -----
@@ -223,8 +216,17 @@ class SentencesController extends AppController
 
             $randomId = $this->Sentence->getRandomId($lang);
 
-            $this->Session->write('random_lang_selected', $lang);
-            $this->redirect(array("action"=>"show", $randomId));
+            if (is_null($randomId)) {
+                $searchDisabled = !Configure::read('Search.enabled');
+                if ($searchDisabled) {
+                    $this->set('searchProblem', 'disabled');
+                } else {
+                    $this->set('searchProblem', 'error');
+                }
+            } else {
+                $this->Session->write('random_lang_selected', $lang);
+                $this->redirect(array("action"=>"show", $randomId));
+            }
 
         }
     }
@@ -269,7 +271,6 @@ class SentencesController extends AppController
             return;
         }
 
-        $this->Sentence->recursive = -1;
         $sentence = $this->Sentence->findById($id);
         if (!$sentence) {
             $this->redirect(array('controller' => 'pages', 'action' => 'home'));
@@ -388,7 +389,6 @@ class SentencesController extends AppController
             $realSentenceId = Sanitize::paranoid($hack_array[1]);
             $sentenceLang = Sanitize::paranoid($hack_array[0]);
 
-            $this->Sentence->recursive = -1;
             $sentence = $this->Sentence->findById($realSentenceId);
             if (!$sentence || !CurrentUser::canEditSentenceOfUserId($sentence['Sentence']['user_id'])) {
                 $this->redirect(array('controller' => 'pages', 'action' => 'home'));
@@ -694,7 +694,6 @@ class SentencesController extends AppController
             $tagsArray = array_map('trim', $tagsArray);
             $result = $this->Tag->find('all', array(
                 'conditions' => array('name' => $tagsArray),
-                'contain' => array(),
                 'fields' => array('id', 'name')
             ));
             $tagsById = Set::combine($result, '{n}.Tag.id', '{n}.Tag.name');
@@ -780,10 +779,8 @@ class SentencesController extends AppController
             $model = 'Sentence';
             $pagination = array(
                 'Sentence' => array(
-                    'fields' => array(
-                        'id',
-                    ),
-                    'contain' => array(),
+                    'fields' => $this->Sentence->fields(),
+                    'contain' => $this->Sentence->contain(),
                     'limit' => CurrentUser::getSetting('sentences_per_page'),
                     'sphinx' => $sphinx,
                     'search' => $query
@@ -856,13 +853,11 @@ class SentencesController extends AppController
 
         $pagination = array(
             'Sentence' => array(
-                'fields' => array(
-                    'id',
-                ),
+                'fields' => $this->Sentence->fields(),
+                'contain' => $this->Sentence->contain(),
                 'conditions' => array(
-                    'lang' => $lang,
+                    'Sentence.lang' => $lang,
                 ),
-                'contain' => array(),
                 'limit' => CurrentUser::getSetting('sentences_per_page'),
                 'order' => "Sentence.id desc"
             )
@@ -881,16 +876,15 @@ class SentencesController extends AppController
             $model = 'SentenceNotTranslatedInto';
             $pagination = array(
                 'SentenceNotTranslatedInto' => array(
-                    'fields' => array(
-                        'id',
-                    ),
+                    'fields' => $this->Sentence->fields(),
                     'conditions' => array(
                         'source' => $lang,
                         'translatedInto' => $translationLang,
                         'notTranslatedInto' => $notTranslatedInto,
                         'audioOnly' => $audioOnly,
                     ),
-                    'contain' => array(),
+                    'contain' => $this->Sentence->contain(),
+                    'order' => 'Sentence.id DESC',
                     'limit' => 10,
                 )
             );
@@ -940,6 +934,13 @@ class SentencesController extends AppController
         $translationLang = null,
         &$real_total = 0
     ) {
+        if ($translationLang == "none") {
+            unset($pagination[$model]['contain']['Translation']);
+        } elseif ($translationLang != "und") {
+            $this->Sentence->linkTranslationModel(array(
+                'Translation.lang' => $translationLang
+            ));
+        }
 
         $this->paginate = $pagination;
         $results = $this->paginate($model);
@@ -950,22 +951,7 @@ class SentencesController extends AppController
             $real_total = $results[0]['Sentence']['_total_found'];
         }
 
-        $sentenceIds = array();
-
-        foreach ($results as $i=>$sentence) {
-            $sentenceIds[$i] = $sentence['Sentence']['id'];
-        }
-
-
-        if ($translationLang == "und") {
-            $translationLang = null ;
-        }
-
-        $allSentences = $this->CommonSentence->getAllNeededForSentences(
-            $sentenceIds,
-            $translationLang
-        );
-        return $allSentences;
+        return $results;
     }
     /**
      * Show random sentence.
@@ -983,16 +969,16 @@ class SentencesController extends AppController
         }
 
         $randomId = $this->Sentence->getRandomId($lang);
-        $randomSentence = $this->Sentence->getSentenceWithId($randomId);
-        $alltranslations = $this->Sentence->getTranslationsOf($randomId);
-        $translations = $alltranslations['Translation'];
-        $indirectTranslations = $alltranslations['IndirectTranslation'];
+
+        if (is_null($randomId)) {
+            $this->set('searchProblem', true);
+            $randomSentence = null;
+        } else {
+            $randomSentence = $this->Sentence->getSentenceWithId($randomId);
+        }
 
         $this->Session->write('random_lang_selected', $lang);
-
         $this->set('random', $randomSentence);
-        $this->set('translations', $translations);
-        $this->set('indirectTranslations', $indirectTranslations);
     }
 
     /**
@@ -1028,19 +1014,27 @@ class SentencesController extends AppController
             $number = 5 ;
         }
 
-        // for far better perfomance we must do it in one request, but hmmm no time
-        // for that and as said above that's a work around
-
-        $randomIds = $this->Sentence->getSeveralRandomIds($lang, $number);
-
         $this->Session->write('random_lang_selected', $lang);
 
-        $allSentences = $this->CommonSentence->getAllNeededForSentences($randomIds);
+        $allSentences = $this->Sentence->find('random', array(
+            'lang' => $lang,
+            'number' => $number,
+            'contain' => $this->Sentence->contain(),
+        ));
 
-        $this->set("allSentences", $allSentences);
+        if (empty($allSentences)) {
+            $searchDisabled = !Configure::read('Search.enabled');
+            if ($searchDisabled) {
+                $this->set('searchProblem', 'disabled');
+            } else {
+                $this->set('searchProblem', 'error');
+            }
+        } else {
+            $this->set("allSentences", $allSentences);
+        }
         $this->set('lastNumberChosen', $number);
-    }
 
+    }
    
     /**
      * Show all the sentences of a given user

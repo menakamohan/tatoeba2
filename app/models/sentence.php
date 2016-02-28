@@ -44,7 +44,6 @@ App::import('Vendor', 'LanguagesLib');
 
 class Sentence extends AppModel
 {
-
     public $name = 'Sentence';
     public $actsAs = array('Containable', 'Transcriptable');
 
@@ -63,7 +62,6 @@ class Sentence extends AppModel
     );
 
     public $hasMany = array(
-        'Link',
         'Contribution',
         'SentenceComment',
         'Favorites_users' => array (
@@ -72,6 +70,10 @@ class Sentence extends AppModel
         ),
         'SentenceAnnotation',
         'Transcription',
+        'Translation' => array(
+            'className' => 'Translation',
+            'foreignKey' => 'sentence_id',
+        ),
     );
 
     public $hasOne = 'ReindexFlag';
@@ -89,8 +91,8 @@ class Sentence extends AppModel
     );
 
     public $hasAndBelongsToMany = array(
-        'Translation' => array(
-            'className' => 'Translation',
+        'Link' => array(
+            'className' => 'Link',
             'joinTable' => 'sentences_translations',
             'foreignKey' => 'translation_id',
             'associationForeignKey' => 'sentence_id'
@@ -114,12 +116,23 @@ class Sentence extends AppModel
     public function __construct($id = false, $table = null, $ds = null)
     {
         parent::__construct($id, $table, $ds);
+
         if (!Configure::read('AutoTranscriptions.enabled')) {
             $this->Behaviors->disable('Transcriptable');
         }
         if (Configure::read('Search.enabled')) {
             $this->Behaviors->attach('Sphinx');
         }
+
+        $this->_findMethods['random'] = true;
+
+        $this->linkTranslationModel();
+    }
+
+    public function linkTranslationModel($conditions = array())
+    {
+        $this->hasMany['Translation']['finderQuery']
+            = $this->Translation->hasManyTranslationsLikeSqlQuery($conditions);
     }
 
     private function clean($text)
@@ -230,7 +243,6 @@ class Sentence extends AppModel
         $sentences = $this->find('all', array(
             'conditions' => array('id' => $ids),
             'fields' => array('id as sentence_id', 'lang'),
-            'recursive' => -1,
         ));
         foreach ($sentences as &$rec) {
             unset($rec['Sentence']['script']); // TODO get this removed
@@ -252,7 +264,7 @@ class Sentence extends AppModel
             'first',
             array(
                 'conditions' => array('Sentence.id' => $this->id),
-                'contain' => array ('Translation', 'User')
+                'contain' => array('Link', 'User')
             )
         );
 
@@ -288,7 +300,7 @@ class Sentence extends AppModel
 
         // --- Logs for links ---
         $action = 'delete';
-        foreach ($this->data['Translation'] as $translation) {
+        foreach ($this->data['Link'] as $translation) {
             $this->Contribution->saveLinkContribution(
                 $sentenceId, $translation['id'], $action
             );
@@ -344,6 +356,22 @@ class Sentence extends AppModel
     }
 
     /**
+     * Custom ->find('random', ...) function.
+     */
+    public function _findRandom($state, $query, $results = array())
+    {
+        if ($state == 'before') {
+            $ids = $this->getSeveralRandomIds($query['lang'], $query['number']);
+            $query['conditions'][$this->alias.'.'.$this->primaryKey] = $ids;
+            unset($query['lang']);
+            unset($query['number']);
+            return $query;
+        } else {
+            return $results;
+        }
+    }
+
+    /**
      * Get the highest id for sentences.
      *
      * @return int The highest sentence id.
@@ -364,8 +392,8 @@ class Sentence extends AppModel
     public function getRandomId($lang = 'und')
     {
         $arrayIds = $this->getSeveralRandomIds($lang, 1);
-        if (empty($arrayIds) || empty($arrayIds[0])) {
-            return 1;
+        if (is_bool($arrayIds)) {
+            return $arrayIds;
         }
 
         return  $arrayIds[0];//$results['Sentence']['id'];
@@ -382,7 +410,7 @@ class Sentence extends AppModel
     public function getSeveralRandomIds($lang = 'und',  $numberOfIdWanted = 10)
     {
         if(Configure::read('Search.enabled') == false) {
-            return array(1);
+            return null;
         }
         
         if(empty($lang)) {
@@ -402,26 +430,30 @@ class Sentence extends AppModel
         if (!is_array($arrayRandom)) {
             $arrayRandom = $this->_getRandomsToCached($lang, 3);
         }
+        
+        if(is_array($arrayRandom)){
+            for ($i = 0; $i < $numberOfIdWanted; $i++) {
 
-        for ($i = 0; $i < $numberOfIdWanted; $i++) {
-
-            $id = array_pop($arrayRandom);
-            // if we have take all the cached ids, then we request a new bunch
-            if ($id === NULL) {
-                $arrayRandom = $this->_getRandomsToCached($lang, 5);
                 $id = array_pop($arrayRandom);
-            }
-            array_push(
-                $returnIds,
-                $id
-            );
+                // if we have take all the cached ids, then we request a new bunch
+                if ($id === NULL) {
+                    $arrayRandom = $this->_getRandomsToCached($lang, 5);
+                    $id = array_pop($arrayRandom);
+                }
+                array_push(
+                    $returnIds,
+                    $id
+                );
 
-        }
+            }
         // we cache the random ids array less all the poped value, for latter use
         Cache::write($cacheKey, $arrayRandom);
 
 
-        return $returnIds;
+            return $returnIds;
+        }
+        
+        return null;
 
     }
 
@@ -454,16 +486,72 @@ class Sentence extends AppModel
             array(
                 'fields' => array('id'),
                 'sphinx' => $sphinx,
-                'contain' => array(),
                 'search' => '',
                 'limit' => 100,
             )
         );
 
-        return array_keys($results);
-
+        if(is_array($results)){
+            return array_keys($results);
+        }
+    
+    return 1;
     }
 
+    /**
+     * Returns the fields names typically needed to display a sentence.
+     */
+    public function fields()
+    {
+        return array(
+            'id',
+            'text',
+            'lang',
+            'user_id',
+            'hasaudio',
+            'correctness',
+            'script',
+        );
+    }
+
+    /**
+     * Returns the appropriate value for the 'contain' parameter
+     * of a typical ->find('all', ...). It makes it return everything
+     * we need to display typical sentence groups.
+     */
+    public function contain()
+    {
+        return array(
+            'Favorites_users' => array(
+                'fields' => array()
+            ),
+            'User' => array(
+                'fields' => array('id', 'username', 'group_id', 'level')
+            ),
+            'SentencesList' => array(
+                'fields' => array('id')
+            ),
+            'Transcription'   => array(
+                'User' => array('fields' => array('username')),
+            ),
+            'Translation' => array(
+                'Transcription' => array(
+                    'User' => array('fields' => array('username')),
+                ),
+            ),
+        );
+    }
+
+    /**
+     * Returns the appropriate value for the 'contain' parameter
+     * of typical a pagination of sentences.
+     */
+    public function paginateContain()
+    {
+        $params = $this->contain();
+        $params['fields'] = $this->fields();
+        return $params;
+    }
 
     /**
      * Get all the informations needed to display a sentences in show section.
@@ -478,28 +566,8 @@ class Sentence extends AppModel
             'first',
             array(
                 'conditions' => array('Sentence.id' => $id),
-                'contain' => array (
-                    'Favorites_users' => array(
-                        'fields' => array()
-                    ),
-                    'User' => array(
-                        'fields' => array('id', 'username', 'group_id', 'level')
-                    ),
-                    'SentencesList' => array(
-                        'fields' => array('id')
-                    ),
-                    'Transcription'   => array(
-                        'User' => array('fields' => array('username')),
-                    ),
-                ),
-                'fields' => array(
-                    'text',
-                    'lang',
-                    'user_id',
-                    'hasaudio',
-                    'correctness',
-                    'script',
-                )
+                'contain' => $this->contain(),
+                'fields' => $this->fields(),
             )
         );
 
@@ -533,7 +601,6 @@ class Sentence extends AppModel
                 'conditions' => array(
                     'Sentence.user_id' => $userId
                 ),
-                'contain' => array()
             )
         );
     }
@@ -560,7 +627,7 @@ class Sentence extends AppModel
             $languages = CurrentUser::getLanguages();
         }
 
-        return $this->Translation->find($id, $languages);
+        return $this->Translation->getTranslationsOf($id, $languages);
     }
 
 
@@ -586,7 +653,6 @@ class Sentence extends AppModel
             array(
                 'fields' => array("id"),
                 'conditions' => $conditions,
-                'contain'=> array()
             )
         );
 
@@ -850,7 +916,6 @@ class Sentence extends AppModel
     {
         $sentence = $this->find('first', array(
             'conditions' => array('id' => $sentenceId),
-            'recursive' => -1,
             'fields' => array('lang', 'user_id'),
         ));
         if (!$sentence) {
@@ -900,14 +965,7 @@ class Sentence extends AppModel
      */
     public function getTotalNumberOfSentences()
     {
-        $numSentences = $this->find(
-            'count',
-            array(
-                'contain' => array()
-            )
-        );
-
-        return $numSentences;
+        return $this->find('count');
     }
 
 
@@ -950,7 +1008,6 @@ class Sentence extends AppModel
             array(
                 'fields' => array('text'),
                 'conditions' => array('id' => $sentenceId),
-                'contain' => array()
             )
         );
 
@@ -971,7 +1028,6 @@ class Sentence extends AppModel
             array(
                 'fields' => array('lang'),
                 'conditions' => array('id' => $sentenceId),
-                'contain' => array()
             )
         );
         
@@ -998,7 +1054,6 @@ class Sentence extends AppModel
         $result = $this->find('all', array(
             'fields' => array('lang', 'id'),
             'conditions' => array('Sentence.id' => $sentencesIds),
-            'recursive' => -1
         ));
         return Set::combine($result, '{n}.Sentence.id', '{n}.Sentence.lang');
     }
